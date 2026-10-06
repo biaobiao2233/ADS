@@ -87,7 +87,7 @@ jobs:
             cat "$E/default-checkbuilddeps.txt"
             printf 'default exit code = %s\n' "$rc"
             test "$rc" = 1
-            grep -q 'Unmet build dependencies: libadscomm-dev$' "$E/default-checkbuilddeps.txt"
+            grep -qi 'unmet build dependencies: libadscomm-dev$' "$E/default-checkbuilddeps.txt"
             echo 'STANDALONE PROFILE:'
             env -u DEB_BUILD_PROFILES dpkg-checkbuilddeps -P pkg.adstool.standalone
             echo 'standalone exit code = 0; libadscomm-dev absent and excluded'
