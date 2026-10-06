@@ -135,6 +135,7 @@ jobs:
           packages=( "$GITHUB_WORKSPACE"/*.deb )
           test "${#packages[@]}" -ge 2
           mkdir -p "$E/packages" "$E/extracted"
+          cp "${packages[@]}" "$E/packages/"
           : > "$E/package-metadata.txt"
           : > "$E/package-file-lists.txt"
           : > "$E/package-depends.txt"
@@ -154,17 +155,22 @@ jobs:
             extract="$E/extracted/$name"
             mkdir -p "$extract"
             dpkg-deb -x "$pkg" "$extract"
+            mkdir -p "$E/extracted/combined"
+            dpkg-deb -x "$pkg" "$E/extracted/combined"
             if find "$extract" -iname '*tcadstool*' -print | grep .; then exit 1; fi
-            broken=$(find "$extract" -xtype l -print)
-            printf '%s broken symlinks: %s\n' "$name" "${broken:-NONE}" | tee -a "$E/package-checks.txt"
-            test -z "$broken"
-            cp "$pkg" "$E/packages/"
             case "$name" in adstool) adspkg="$pkg";; libads-dev) devpkg="$pkg";; esac
           done
+          broken=$(find "$E/extracted/combined" -xtype l -print)
+          printf 'Combined package filesystem broken symlinks: %s\n' "${broken:-NONE}" | tee -a "$E/package-checks.txt"
+          test -z "$broken"
+          broken=$(find "$E/extracted/libads-dev" -xtype l -print)
+          printf 'libads-dev broken symlinks: %s\n' "${broken:-NONE}" | tee -a "$E/package-checks.txt"
+          test -z "$broken"
           test -n "$adspkg"
           test -n "$devpkg"
           test -x "$E/extracted/adstool/usr/bin/adstool"
-          test -s "$E/extracted/adstool/usr/share/man/man1/adstool.1"
+          test -s "$E/extracted/adstool/usr/share/man/man1/adstool.1.gz"
+          gzip -t "$E/extracted/adstool/usr/share/man/man1/adstool.1.gz"
           test -s "$E/extracted/libads-dev/usr/lib/libAdsLib.a"
           while IFS= read -r header; do
             test -s "$E/extracted/libads-dev/usr/include/$header"
