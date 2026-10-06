@@ -1,0 +1,239 @@
+name: Validate PR313 Debian13 frozen candidate
+on:
+  push:
+    branches: [validation/pr313-debian13]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  debian13-standalone:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: debian:13
+    env:
+      CANDIDATE: 8ea4304977661cf4be938f13b3c31f0565cb866d
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install real Debian tooling and record environment
+        run: |
+          set -Eeuo pipefail
+          E="$GITHUB_WORKSPACE/evidence"
+          mkdir -p "$E"
+          exec > >(tee -a "$E/validation-transcript.txt") 2>&1
+          exec 3>>"$E/commands.txt"
+          export BASH_XTRACEFD=3
+          PS4='+ ${BASH_SOURCE}:${LINENO}: '
+          set -x
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git build-essential dpkg-dev debhelper git-restore-mtime meson ninja-build python3-sphinx fakeroot binutils file
+          {
+            cat /etc/os-release
+            uname -a
+            dpkg --version
+            gcc --version
+            dpkg --print-architecture
+            meson --version
+            ninja --version
+            dpkg-query -W build-essential dpkg-dev debhelper git-restore-mtime meson ninja-build python3-sphinx
+            dpkg-buildflags
+            cat /etc/apt/sources.list.d/debian.sources
+          } | tee "$E/environment.txt"
+          source /etc/os-release
+          test "$ID" = debian
+          test "$VERSION_ID" = 13
+          test "$VERSION_CODENAME" = trixie
+      - name: Checkout exact frozen candidate
+        uses: actions/checkout@v4
+        with:
+          repository: biaobiao2233/ADS
+          ref: 8ea4304977661cf4be938f13b3c31f0565cb866d
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify frozen source and both dependency profiles
+        run: |
+          set -Eeuo pipefail
+          E="$GITHUB_WORKSPACE/evidence"
+          mkdir -p "$E"
+          exec > >(tee -a "$E/validation-transcript.txt") 2>&1
+          exec 3>>"$E/commands.txt"
+          export BASH_XTRACEFD=3
+          PS4='+ ${BASH_SOURCE}:${LINENO}: '
+          set -x
+          cd "$GITHUB_WORKSPACE/candidate"
+          git config --global --add safe.directory "$PWD"
+          {
+            git rev-parse HEAD
+            git status --short
+            test "$(git rev-parse HEAD)" = "$CANDIDATE"
+            test -z "$(git status --porcelain)"
+            printf 'HEAD = %s\nworking tree clean\n' "$CANDIDATE"
+          } | tee "$E/source-identity.txt"
+          if dpkg-query -W -f='${db:Status-Status}' libadscomm-dev 2>/dev/null | grep -qx installed; then
+            echo 'Unexpected libadscomm-dev installed'; exit 1
+          fi
+          {
+            cat debian/control debian/rules Makefile meson_options.txt
+            sed -n '/if get_option.*tcadsdll_include/,/^endif/p' meson.build
+            echo 'DEFAULT PROFILE:'
+            set +e
+            env -u DEB_BUILD_PROFILES dpkg-checkbuilddeps -P '' > "$E/default-checkbuilddeps.txt" 2>&1
+            rc=$?
+            set -e
+            cat "$E/default-checkbuilddeps.txt"
+            printf 'default exit code = %s\n' "$rc"
+            test "$rc" = 1
+            grep -q 'Unmet build dependencies: libadscomm-dev$' "$E/default-checkbuilddeps.txt"
+            echo 'STANDALONE PROFILE:'
+            env -u DEB_BUILD_PROFILES dpkg-checkbuilddeps -P pkg.adstool.standalone
+            echo 'standalone exit code = 0; libadscomm-dev absent and excluded'
+            echo 'DEFAULT MAKE/DEBIAN RULES VALUES:'
+            printf '__validation_dump:\n\t@echo WITH_TWINCAT_ROUTER=$(WITH_TWINCAT_ROUTER)\n\t@echo BINARIES=$(BINARIES)\n\t@echo MESON_ROUTER_OPTIONS=$(MESON_ROUTER_OPTIONS)\n' | env -u DEB_BUILD_PROFILES -u WITH_TWINCAT_ROUTER make -s -f debian/rules -f Makefile -f - __validation_dump
+            echo 'STANDALONE MAKE/DEBIAN RULES VALUES:'
+            printf '__validation_dump:\n\t@echo WITH_TWINCAT_ROUTER=$(WITH_TWINCAT_ROUTER)\n\t@echo BINARIES=$(BINARIES)\n\t@echo MESON_ROUTER_OPTIONS=$(MESON_ROUTER_OPTIONS)\n' | env -u WITH_TWINCAT_ROUTER DEB_BUILD_PROFILES=pkg.adstool.standalone make -s -f debian/rules -f Makefile -f - __validation_dump
+          } | tee "$E/dependency-profiles.txt"
+          test -z "$(git status --porcelain)"
+      - name: Build real standalone Debian binary packages without skipping dependencies
+        run: |
+          set -Eeuo pipefail
+          E="$GITHUB_WORKSPACE/evidence"
+          mkdir -p "$E"
+          exec > >(tee -a "$E/validation-transcript.txt") 2>&1
+          exec 3>>"$E/commands.txt"
+          export BASH_XTRACEFD=3
+          PS4='+ ${BASH_SOURCE}:${LINENO}: '
+          set -x
+          cd "$GITHUB_WORKSPACE/candidate"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test -z "$(git status --porcelain)"
+          printf '%s\n' 'dpkg-buildpackage -us -uc -b -Ppkg.adstool.standalone' | tee "$E/build-command.txt"
+          set +e
+          env -u DEB_BUILD_PROFILES -u WITH_TWINCAT_ROUTER dpkg-buildpackage -us -uc -b -Ppkg.adstool.standalone 2>&1 | tee "$E/build.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          printf 'dpkg-buildpackage exit code = %s\nused -d: NO\n' "$rc" | tee "$E/build-result.txt"
+          test "$rc" = 0
+          git diff --exit-code
+          git diff --cached --exit-code
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+      - name: Inspect real deb metadata, files, development headers and symlinks
+        run: |
+          set -Eeuo pipefail
+          E="$GITHUB_WORKSPACE/evidence"
+          mkdir -p "$E"
+          exec > >(tee -a "$E/validation-transcript.txt") 2>&1
+          exec 3>>"$E/commands.txt"
+          export BASH_XTRACEFD=3
+          PS4='+ ${BASH_SOURCE}:${LINENO}: '
+          set -x
+          cd "$GITHUB_WORKSPACE/candidate"
+          shopt -s nullglob
+          packages=( "$GITHUB_WORKSPACE"/*.deb )
+          test "${#packages[@]}" -ge 2
+          mkdir -p "$E/packages" "$E/extracted"
+          : > "$E/package-metadata.txt"
+          : > "$E/package-file-lists.txt"
+          : > "$E/package-depends.txt"
+          adspkg=''
+          devpkg=''
+          for pkg in "${packages[@]}"; do
+            name=$(dpkg-deb -f "$pkg" Package)
+            {
+              printf '\n=== %s ===\n' "$(basename "$pkg")"
+              dpkg-deb -I "$pkg"
+              dpkg-deb -f "$pkg" Package Version Architecture Depends
+            } | tee -a "$E/package-metadata.txt"
+            dpkg-deb -c "$pkg" | tee -a "$E/package-file-lists.txt"
+            depends=$(dpkg-deb -f "$pkg" Depends)
+            printf '%s: %s\n' "$name" "$depends" | tee -a "$E/package-depends.txt"
+            if printf '%s' "$depends" | grep -Eiq 'adscomm|tcads|twincat|beckhoff'; then exit 1; fi
+            extract="$E/extracted/$name"
+            mkdir -p "$extract"
+            dpkg-deb -x "$pkg" "$extract"
+            if find "$extract" -iname '*tcadstool*' -print | grep .; then exit 1; fi
+            broken=$(find "$extract" -xtype l -print)
+            printf '%s broken symlinks: %s\n' "$name" "${broken:-NONE}" | tee -a "$E/package-checks.txt"
+            test -z "$broken"
+            cp "$pkg" "$E/packages/"
+            case "$name" in adstool) adspkg="$pkg";; libads-dev) devpkg="$pkg";; esac
+          done
+          test -n "$adspkg"
+          test -n "$devpkg"
+          test -x "$E/extracted/adstool/usr/bin/adstool"
+          test -s "$E/extracted/adstool/usr/share/man/man1/adstool.1"
+          test -s "$E/extracted/libads-dev/usr/lib/libAdsLib.a"
+          while IFS= read -r header; do
+            test -s "$E/extracted/libads-dev/usr/include/$header"
+            cmp "$header" "$E/extracted/libads-dev/usr/include/$header"
+            printf 'PRESENT, source-identical: /usr/include/%s\n' "$header"
+          done < <(find AdsLib -type f -name '*.h' | sort) | tee "$E/header-checks.txt"
+          for header in AdsLib/AdsDef.h AdsLib/AdsLib.h AdsLib/AmsConnection.h AdsLib/AmsPort.h AdsLib/AmsRouter.h AdsLib/NotificationDispatcher.h AdsLib/wrap_endian.h AdsLib/wrap_registry.h AdsLib/wrap_socket.h AdsLib/TwinCAT/AdsDef.h AdsLib/TwinCAT/AdsLib.h AdsLib/standalone/AdsDef.h AdsLib/standalone/AdsLib.h; do
+            test -s "$E/extracted/libads-dev/usr/include/$header"
+          done
+          printf 'adstool present: YES\ntcadstool absent from all packages: YES\nlibads-dev present: YES\nall repository headers present and source-identical: YES\nwrapper headers present: YES\nbroken symlinks: NONE\n' | tee -a "$E/package-checks.txt"
+          cp "$GITHUB_WORKSPACE"/*.buildinfo "$GITHUB_WORKSPACE"/*.changes "$E/packages/"
+      - name: Inspect ELF and smoke-test the packaged standalone executable
+        run: |
+          set -Eeuo pipefail
+          E="$GITHUB_WORKSPACE/evidence"
+          mkdir -p "$E"
+          exec > >(tee -a "$E/validation-transcript.txt") 2>&1
+          exec 3>>"$E/commands.txt"
+          export BASH_XTRACEFD=3
+          PS4='+ ${BASH_SOURCE}:${LINENO}: '
+          set -x
+          binary="$E/extracted/adstool/usr/bin/adstool"
+          {
+            file "$binary"
+            ldd "$binary"
+            readelf -d "$binary"
+          } | tee "$E/ldd-or-readelf.txt"
+          if grep -Eiq 'not found|adscomm|tcads|twincat' "$E/ldd-or-readelf.txt"; then exit 1; fi
+          "$binary" --help > "$E/adstool-help.txt" 2>&1
+          "$binary" --version > "$E/adstool-version.txt" 2>&1
+          grep -q 'USAGE:' "$E/adstool-help.txt"
+          test "$(cat "$E/adstool-version.txt")" = "$(dpkg-deb -f "$E"/packages/adstool_*.deb Version)"
+          cat "$E/adstool-help.txt" "$E/adstool-version.txt"
+          apt-get install -y --no-install-recommends "$E"/packages/adstool_*.deb "$E"/packages/libads-dev_*.deb
+          /usr/bin/adstool --help > "$E/installed-adstool-help.txt" 2>&1
+          /usr/bin/adstool --version > "$E/installed-adstool-version.txt" 2>&1
+          grep -q 'USAGE:' "$E/installed-adstool-help.txt"
+          cmp "$E/adstool-version.txt" "$E/installed-adstool-version.txt"
+          test ! -e /usr/bin/tcadstool
+          printf 'extracted --help exit code: 0\nextracted --version exit code: 0\ninstalled --help exit code: 0\ninstalled --version exit code: 0\n' | tee "$E/binary-smoke.txt"
+      - name: Final source readback and evidence checksums
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          E="$GITHUB_WORKSPACE/evidence"
+          mkdir -p "$E"
+          exec > >(tee -a "$E/validation-transcript.txt") 2>&1
+          exec 3>>"$E/commands.txt"
+          export BASH_XTRACEFD=3
+          PS4='+ ${BASH_SOURCE}:${LINENO}: '
+          set -x
+          if test -d "$GITHUB_WORKSPACE/candidate/.git"; then
+            cd "$GITHUB_WORKSPACE/candidate"
+            { git rev-parse HEAD; git status --short; git diff --stat; } | tee "$E/source-final.txt"
+            test "$(git rev-parse HEAD)" = "$CANDIDATE"
+            git diff --exit-code
+            git diff --cached --exit-code
+          fi
+          cd "$E"
+          find . -type f ! -path './extracted/*' ! -name sha256sums.txt ! -name commands.txt ! -name validation-transcript.txt -print0 | sort -z | xargs -0 -r sha256sum > sha256sums.txt
+          cat sha256sums.txt
+      - name: Upload independent validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr313-debian13-standalone-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            evidence/*.txt
+            evidence/*.log
+            evidence/packages/*
+          if-no-files-found: error
+          retention-days: 30
